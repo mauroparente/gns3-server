@@ -20,6 +20,10 @@ import sys
 import asyncio
 import inspect
 
+from prompt_toolkit import prompt
+from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.contrib.completers import WordCompleter
+
 from .telnet_server import AsyncioTelnetServer
 
 
@@ -111,6 +115,21 @@ class EmbedShell:
             res = yield from self._parse_command(result)
             self._writer.feed_data(res.encode())
 
+    def get_commands(self):
+        """
+        Returns commands available to execute
+        :return: list of (name, doc) tuples
+        """
+        commands = []
+        for name, value in inspect.getmembers(self):
+            if not inspect.isgeneratorfunction(value):
+                continue
+            if name.startswith('_') or name == 'run':
+                continue
+            doc = inspect.getdoc(value)
+            commands.append((name, doc))
+        return commands
+
 
 def create_telnet_shell(shell, loop=None):
     """
@@ -128,11 +147,13 @@ def create_telnet_shell(shell, loop=None):
         @asyncio.coroutine
         def drain(self):
             pass
+
     shell.reader = Stream()
     shell.writer = Stream()
     if loop is None:
         loop = asyncio.get_event_loop()
     loop.create_task(shell.run())
+
     return AsyncioTelnetServer(reader=shell.writer, writer=shell.reader, binary=False, echo=False)
 
 
@@ -145,9 +166,13 @@ def create_stdin_shell(shell, loop=None):
     :returns: Telnet server
     """
     @asyncio.coroutine
-    def feed_stdin(loop, reader):
+    def feed_stdin(loop, reader, shell):
+        history = InMemoryHistory()
+        completer = WordCompleter([name for name, _ in shell.get_commands()], ignore_case=True)
         while True:
-            line = yield from loop.run_in_executor(None, sys.stdin.readline)
+            line = yield from prompt(
+                ">", patch_stdout=True, return_asyncio_coroutine=True, history=history, completer=completer)
+            line += '\n'
             reader.feed_data(line.encode())
 
     @asyncio.coroutine
@@ -164,7 +189,7 @@ def create_stdin_shell(shell, loop=None):
     if loop is None:
         loop = asyncio.get_event_loop()
 
-    reader_task = loop.create_task(feed_stdin(loop, reader))
+    reader_task = loop.create_task(feed_stdin(loop, reader, shell))
     writer_task = loop.create_task(read_stdout(writer))
     shell_task = loop.create_task(shell.run())
     return asyncio.gather(shell_task, writer_task, reader_task)
