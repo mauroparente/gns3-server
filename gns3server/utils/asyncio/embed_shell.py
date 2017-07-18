@@ -21,8 +21,11 @@ import asyncio
 import inspect
 
 from prompt_toolkit import prompt
+from prompt_toolkit.eventloop.base import EventLoop
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.contrib.completers import WordCompleter
+from prompt_toolkit.shortcuts import create_prompt_application, create_asyncio_eventloop
+from prompt_toolkit.contrib.telnet.server import InputStream, Vt100_Output, Size, CommandLineInterface, DEFAULT_BUFFER
 
 from .telnet_server import AsyncioTelnetServer
 
@@ -131,30 +134,102 @@ class EmbedShell:
         return commands
 
 
+class CLIInputStream(asyncio.StreamReader):
+    """
+    InputStream which handles CLI commands
+    """
+    def __init__(self, inputstream, cli):
+        self._inputstream = inputstream
+        self._cli = cli
+        super().__init__()
+
+    def write(self, data):
+        data = data.decode()
+        self._inputstream.feed(data)
+        # Prompt toolkit has returned the command
+        if self._cli.is_returning:
+            returned_value = self._cli.return_value()
+            self.feed_data((returned_value.text + "\n").encode())
+            self._cli.reset()
+            self._cli.buffers[DEFAULT_BUFFER].reset()
+            self._cli.renderer.request_absolute_cursor_position()
+            self._cli._redraw()
+
+    @asyncio.coroutine
+    def drain(self):
+        pass
+
+
+class UnstopableEventLoop(EventLoop):
+    """
+    Partially fake event loop which cannot be stopped by CommandLineInterface
+    """
+    def __init__(self, loop):
+        self._loop = loop
+
+    def close(self):
+        " Ignore. "
+
+    def stop(self):
+        " Ignore. "
+
+    def run_in_executor(self, *args, **kwargs):
+        return self._loop.run_in_executor(*args, **kwargs)
+
+    def call_from_executor(self, *args, **kwargs):
+        self._loop.call_from_executor(*args, **kwargs)
+
+    def add_reader(self, fd, callback):
+        raise NotImplementedError
+
+    def remove_reader(self, fd):
+        raise NotImplementedError
+
+
+class StreamWriter(asyncio.StreamReader):
+    def __init__(self):
+        super().__init__()
+        self.encoding = 'utf-8'
+
+    def write(self, data):
+        self.feed_data(data)
+
+    def flush(self):
+        pass
+
+    def feed_data(self, data):
+        data = data.decode().replace("\n", "\r\n")
+        return super(StreamWriter, self).feed_data(data.encode())
+
+
 def create_telnet_shell(shell, loop=None):
     """
     Run a shell application with a telnet frontend
-
     :param application: An EmbedShell instance
     :param loop: The event loop
     :returns: Telnet server
     """
-    class Stream(asyncio.StreamReader):
 
-        def write(self, data):
-            self.feed_data(data)
-
-        @asyncio.coroutine
-        def drain(self):
-            pass
-
-    shell.reader = Stream()
-    shell.writer = Stream()
     if loop is None:
         loop = asyncio.get_event_loop()
-    loop.create_task(shell.run())
 
-    return AsyncioTelnetServer(reader=shell.writer, writer=shell.reader, binary=False, echo=False)
+    shell.writer = StreamWriter()
+
+    cli = CommandLineInterface(
+        application=create_prompt_application(''),
+        eventloop=UnstopableEventLoop(create_asyncio_eventloop(loop)),
+        output=Vt100_Output(
+            shell.writer, lambda: Size(rows=40, columns=79)))
+    cb = cli.create_eventloop_callbacks()
+    inputstream = InputStream(cb.feed_key)
+
+    # Taken from prompt_toolkit telnet server
+    # https://github.com/jonathanslenders/python-prompt-toolkit/blob/99fa7fae61c9b4ed9767ead3b4f9b1318cfa875d/prompt_toolkit/contrib/telnet/server.py#L165
+    cli._is_running = True
+    shell.reader = CLIInputStream(inputstream, cli)
+    loop.create_task(shell.run())
+    return AsyncioTelnetServer(
+        reader=shell.writer, writer=shell.reader, binary=True, echo=True)
 
 
 def create_stdin_shell(shell, loop=None):
@@ -212,14 +287,15 @@ if __name__ == '__main__':
                 return 'world\n'
 
     # Demo using telnet
-    # server = create_telnet_shell(Demo())
-    # coro = asyncio.start_server(server.run, '127.0.0.1', 4444, loop=loop)
-    # s = loop.run_until_complete(coro)
-    # try:
-    #     loop.run_forever()
-    # except KeyboardInterrupt:
-    #     pass
+    shell = Demo()
+    server = create_telnet_shell(shell)
+    coro = asyncio.start_server(server.run, '127.0.0.1', 4444, loop=loop)
+    s = loop.run_until_complete(coro)
+    try:
+        loop.run_forever()
+    except KeyboardInterrupt:
+        pass
 
     # Demo using stdin
-    loop.run_until_complete(create_stdin_shell(Demo()))
-    loop.close()
+    # loop.run_until_complete(create_stdin_shell(Demo()))
+    # loop.close()
