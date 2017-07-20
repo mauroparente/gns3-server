@@ -21,6 +21,7 @@ Dynamips server module.
 
 import aiohttp
 import sys
+import re
 import os
 import shutil
 import socket
@@ -605,3 +606,27 @@ class Dynamips(BaseManager):
             if was_auto_started:
                 yield from vm.stop()
         return validated_idlepc
+
+    @asyncio.coroutine
+    def duplicate_node(self, source_node_id, destination_node_id):
+        """
+        Duplicate a node
+
+        :param node_id: Node identifier
+        :returns: New node instance
+        """
+        destination_node = yield from super().duplicate_node(
+            source_node_id,
+            destination_node_id,
+            ignore=['*_lock']
+        )
+        # Fix files dynamips id
+        for root, dirs, files in os.walk(destination_node.working_dir):
+            for file in files:
+                if "_i" in file:
+                    src = os.path.join(root, file)
+                    dst = re.sub(r"_i[0-9]+", "_i{}".format(destination_node.dynamips_id), file)
+                    dst = re.sub(r"^i[0-9]+", "i{}".format(destination_node.dynamips_id), dst)
+                    dst = os.path.join(root, dst)
+                    shutil.move(src, dst)
+        return destination_node

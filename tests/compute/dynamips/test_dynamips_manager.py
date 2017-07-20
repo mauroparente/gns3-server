@@ -26,6 +26,7 @@ import asyncio
 from gns3server.compute.dynamips import Dynamips
 from gns3server.compute.dynamips.dynamips_error import DynamipsError
 from unittest.mock import patch
+from tests.utils import asyncio_patch
 
 
 @pytest.fixture
@@ -82,7 +83,7 @@ def test_release_dynamips_id(manager):
     manager.release_dynamips_id(project_2, 0)
 
 
-def test_project_closed(manager, project, loop):
+def test_project_closed(manager, project, async_run):
 
     manager._dynamips_ids[project.id] = set([1, 2, 3])
 
@@ -90,7 +91,37 @@ def test_project_closed(manager, project, loop):
     os.makedirs(project_dir)
     open(os.path.join(project_dir, "test.ghost"), "w+").close()
 
-    loop.run_until_complete(asyncio.async(manager.project_closed(project)))
+    async_run(manager.project_closed(project))
 
     assert not os.path.exists(os.path.join(project_dir, "test.ghost"))
     assert project.id not in manager._dynamips_ids
+
+
+def test_duplicate_node(manager, project, async_run):
+    with asyncio_patch('gns3server.compute.dynamips.nodes.c7200.C7200.create'):
+        source_node = async_run(manager.create_node(
+            'R1',
+            project.id,
+            str(uuid.uuid4()),
+            platform="c7200"
+        ))
+        destination_node = async_run(manager.create_node(
+            'R2',
+            project.id,
+            str(uuid.uuid4()),
+            platform="c7200"
+        ))
+
+        # Some file are ignored
+        with open(os.path.join(source_node.working_dir, 'c3600_i1_lock'), 'w+') as f:
+            f.write("1")
+        with open(os.path.join(source_node.working_dir, 'c3600_i1_nvram'), 'w+') as f:
+            f.write("1")
+        with open(os.path.join(source_node.working_dir, 'configs', 'b'), 'w+') as f:
+            f.write("1")
+        async_run(manager.duplicate_node(source_node.id, destination_node.id))
+        assert not os.path.exists(os.path.join(destination_node.working_dir, 'c3600_i1_lock'))
+        assert not os.path.exists(os.path.join(destination_node.working_dir, 'c3600_i2_lock'))
+        # Should have been renamed
+        assert os.path.exists(os.path.join(destination_node.working_dir, 'c3600_i2_nvram'))
+        assert os.path.exists(os.path.join(destination_node.working_dir, 'configs', 'b'))

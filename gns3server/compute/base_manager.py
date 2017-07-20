@@ -257,6 +257,39 @@ class BaseManager:
         return node
 
     @asyncio.coroutine
+    def duplicate_node(self, source_node_id, destination_node_id, ignore=[]):
+        """
+        Duplicate a node
+
+        :param source_node_id: Source node identifier
+        :param destination_node_id: Destination node identifier
+        :param ignore: List of pattern path to ignore
+        :returns: New node instance
+        """
+        source_node = self.get_node(source_node_id)
+        destination_node = self.get_node(destination_node_id)
+
+        # Some node don't have working dir like switch
+        if not hasattr(destination_node, "working_dir"):
+            return destination_node
+
+        destination_dir = destination_node.working_dir
+        try:
+            shutil.rmtree(destination_dir)
+            shutil.copytree(source_node.working_dir, destination_dir,
+                            ignore=shutil.ignore_patterns(*ignore))
+        except OSError as e:
+            raise aiohttp.web.HTTPConflict(text="Can't duplicate node data: {}".format(e))
+
+        # We force a refresh of the name. This force the rewrite
+        # of some configuration files
+        node_name = destination_node.name
+        destination_node.name = node_name + "tmp"
+        destination_node.name = node_name
+
+        return destination_node
+
+    @asyncio.coroutine
     def close_node(self, node_id):
         """
         Close a node
